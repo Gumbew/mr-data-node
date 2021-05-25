@@ -1,9 +1,13 @@
 import base64
 import json
 import os
-import requests
 import shutil
+import tempfile
+from pathlib import Path
+
+import dask.dataframe as dd
 import pandas as pd
+import requests
 
 with open(os.path.join(os.path.dirname(__file__), '..', 'config', 'config.json')) as config_file:
     config = json.load(config_file)
@@ -29,6 +33,7 @@ def get_file_paths(file_name):
 
 
 class Command:
+    paths_per_file_name = {}
     file_name_path = None
     folder_name_path = None
     init_folder_name_path = None
@@ -37,46 +42,63 @@ class Command:
     map_folder_name_path = None
     data_folder_name_path = None
 
+    # TODO: refactor
     @staticmethod
-    def init_folder_variables(file_name):
+    def init_folder_variables(file_name, file_id):
         name, extension = os.path.splitext(file_name)
         folder_format = name + config['name_delimiter'] + '{}' + extension
-        Command.data_folder_name_path = config['data_folder_name']
-        Command.file_name_path = os.path.join(Command.data_folder_name_path, file_name)
-        Command.folder_name_path = os.path.join(Command.data_folder_name_path,
-                                                folder_format.format(config['folder_name']))
-        Command.init_folder_name_path = os.path.join(Command.folder_name_path,
-                                                     folder_format.format(config['init_folder_name']))
-        Command.reduce_folder_name_path = os.path.join(Command.folder_name_path,
-                                                       folder_format.format(config['reduce_folder_name']))
-        Command.shuffle_folder_name_path = os.path.join(Command.folder_name_path,
-                                                        folder_format.format(config['shuffle_folder_name']))
-        Command.map_folder_name_path = os.path.join(Command.folder_name_path,
-                                                    folder_format.format(config['map_folder_name']))
+        Command.paths_per_file_name[file_id] = {
+            "data_folder_name_path": config['data_folder_name'],
+            "file_name_path": os.path.join(config['data_folder_name'], file_name),
+            "folder_name_path": os.path.join(config['data_folder_name'],
+                                             folder_format.format(config['folder_name'])),
+        }
+
+        Command.paths_per_file_name[file_id].update(
+            {
+                "init_folder_name_path": os.path.join(Command.paths_per_file_name[file_id]["folder_name_path"],
+                                                      folder_format.format(config['init_folder_name'])),
+                "reduce_folder_name_path": os.path.join(Command.paths_per_file_name[file_id]["folder_name_path"],
+                                                        folder_format.format(config['reduce_folder_name'])),
+                "shuffle_folder_name_path": os.path.join(Command.paths_per_file_name[file_id]["folder_name_path"],
+                                                         folder_format.format(config['shuffle_folder_name'])),
+                "map_folder_name_path": os.path.join(Command.paths_per_file_name[file_id]["folder_name_path"],
+                                                     folder_format.format(config['map_folder_name'])),
+            }
+        )
+
         updated_config = get_updated_config()
         file_paths_info = {
+            "file_id": file_id,
             "file_name": file_name,
-            "data_folder_name_path": Command.data_folder_name_path,
-            "file_name_path": Command.file_name_path,
-            "folder_name_path": Command.folder_name_path,
-            "init_folder_name_path": Command.init_folder_name_path,
-            "reduce_folder_name_path": Command.reduce_folder_name_path,
-            "shuffle_folder_name_path": Command.shuffle_folder_name_path,
-            "map_folder_name_path": Command.map_folder_name_path
+            "data_folder_name_path": Command.paths_per_file_name[file_id]["data_folder_name_path"],
+            "file_name_path": Command.paths_per_file_name[file_id]["file_name_path"],
+            "folder_name_path": Command.paths_per_file_name[file_id]["folder_name_path"],
+            "init_folder_name_path": Command.paths_per_file_name[file_id]["init_folder_name_path"],
+            "reduce_folder_name_path": Command.paths_per_file_name[file_id]["reduce_folder_name_path"],
+            "shuffle_folder_name_path": Command.paths_per_file_name[file_id]["shuffle_folder_name_path"],
+            "map_folder_name_path": Command.paths_per_file_name[file_id]["map_folder_name_path"],
         }
-        if not file_paths_info in updated_config["files"]:
+
+        if file_paths_info not in updated_config["files"]:
             updated_config['files'].append(file_paths_info)
+
         save_changes_to_updated_config(updated_config)
 
     @staticmethod
-    def create_folders():
-        if os.path.exists(Command.file_name_path):
-            Command.clear_data({"folder_name": os.path.basename(Command.file_name_path), "remove_all_data": False})
-        Command.make_folder(Command.folder_name_path)
-        Command.make_folder(Command.init_folder_name_path)
-        Command.make_folder(Command.map_folder_name_path)
-        Command.make_folder(Command.shuffle_folder_name_path)
-        Command.make_folder(Command.reduce_folder_name_path)
+    def create_folders(file_name, file_id):
+        if os.path.exists(Command.paths_per_file_name[file_id]["file_name_path"]):
+            Command.clear_data(
+                {
+                    "folder_name": os.path.basename(Command.paths_per_file_name[file_id]["file_name_path"]),
+                    "remove_all_data": False
+                }
+            )
+        Command.make_folder(Command.paths_per_file_name[file_id]["folder_name_path"])
+        Command.make_folder(Command.paths_per_file_name[file_id]["init_folder_name_path"])
+        Command.make_folder(Command.paths_per_file_name[file_id]["map_folder_name_path"])
+        Command.make_folder(Command.paths_per_file_name[file_id]["shuffle_folder_name_path"])
+        Command.make_folder(Command.paths_per_file_name[file_id]["reduce_folder_name_path"])
 
     @staticmethod
     def make_folder(path):
@@ -86,24 +108,25 @@ class Command:
     @staticmethod
     def write(content):
         file_name = content["file_name"]
-        path = os.path.join(Command.init_folder_name_path, file_name)
-        with open(path, 'w+', encoding='utf-8') as f:
-            f.write(content["segment"]["headers"])
-            f.writelines(content['segment']["items"])
+        file_id = content["file_id"]
+        path = os.path.join(Command.paths_per_file_name[file_id]["init_folder_name_path"], file_name)
+        with open(path, 'wb+') as f:
+            f.write(str.encode(content["segment"]["headers"]))
+            items = json.loads(content['segment']["items"])
+            f.writelines([str.encode(x) for x in items])
 
     @staticmethod
     def hash_f(input):
         return hash(input)
 
     @staticmethod
-    def hash_keys(field_delimiter):
-        # r=root, d=directories, f = files
-        files = [os.path.join(r, file) for r, d, f in os.walk(Command.map_folder_name_path) for file in f]
+    def hash_keys(field_delimiter, file_id):
         hash_key_list = []
-        for f in files:
-            data_f = pd.read_csv(f, sep=field_delimiter)
-
-            for j in data_f.loc[:, "key_column"]:
+        for segment in Command.paths_per_file_name[file_id]["segment_list"]:
+            data_f = dd.read_parquet(os.path.join(Command.paths_per_file_name[file_id]["map_folder_name_path"],
+                                                  segment, "part.0.parquet"))
+            # for j in data_f.loc[:, "key_column"]:
+            for j in data_f.loc["key_column"]:
                 hash_key_list.append(Command.hash_f(j))
 
         return hash_key_list
@@ -112,66 +135,92 @@ class Command:
     def reduce(content):
         reducer = base64.b64decode(content['reducer'])
         field_delimiter = content['field_delimiter']
-        dest = content['destination_file']
-        file_path = os.path.join(Command.shuffle_folder_name_path, 'shuffled.csv')
-        first_file_paths = get_file_paths(content["source_file"])
-        if ',' in content['source_file']:
-            first_file_path, second_file_path = content['source_file'].split(',')
+        file_id = content["file_id"]
+        file_name = content["source_file"]
+
+        file_path = Path(Command.paths_per_file_name[file_id]["shuffle_folder_name_path"], "shuffled.csv")
+
+        shuffled_files = [os.path.join(file_path, f) for f in os.listdir(file_path)
+                          if os.path.splitext(f)[-1] == ".parquet"]
+        first_file_paths = get_file_paths(file_name)
+        if ',' in file_name:
+            first_file_path, second_file_path = file_name.split(',')
 
             first_file_paths = get_file_paths(first_file_path)
-
             first_shuffle_file_path = os.path.join(first_file_paths['shuffle_folder_name_path'], 'shuffled.csv')
-            second_file_paths = get_file_paths(second_file_path)
 
+            first_shuffled_files = [os.path.join(first_shuffle_file_path, f)
+                                    for f in os.listdir(first_shuffle_file_path)
+                                    if os.path.splitext(f)[-1] == ".parquet"]
+
+            second_file_paths = get_file_paths(second_file_path)
             second_shuffle_file_path = os.path.join(second_file_paths['shuffle_folder_name_path'], 'shuffled.csv')
-            file_path = (first_shuffle_file_path, second_shuffle_file_path)
+
+            second_shuffled_files = [os.path.join(second_shuffle_file_path, f)
+                                     for f in os.listdir(second_shuffle_file_path)
+                                     if os.path.splitext(f)[-1] == ".parquet"]
+
+            shuffled_files = zip(first_shuffled_files, second_shuffled_files)
 
         exec(reducer)
 
         destination_file_path = os.path.join(first_file_paths["data_folder_name_path"], first_file_paths["file_name"])
-        locals()['custom_reducer'](file_path, destination_file_path)
+        for shuffled_file in shuffled_files:
+            locals()['custom_reducer'](shuffled_file, destination_file_path)
 
     @staticmethod
     def finish_shuffle(content):
-        cols = list(pd.read_json(content['content']).columns)
-        field_delimiter = content['field_delimiter']
+        # cols = list(pd.read_json(content['content']).columns)
+        # field_delimiter = content['field_delimiter']
 
         data_frame = pd.read_json(content['content'])
+        data_frame = dd.from_pandas(data_frame, npartitions=2)
         if not os.path.isfile(content['file_path']):
-            data_frame.to_csv(content['file_path'], header=cols, encoding='utf-8', index=False, sep=field_delimiter)
+            data_frame.to_parquet(content['file_path'],
+                                  write_index=False,
+                                  engine="pyarrow",
+                                  )
         else:
-            data_frame.to_csv(content['file_path'], mode='a', header=False, index=False, encoding='utf-8',
-                              sep=field_delimiter)
+            data_frame.to_csv(content['file_path'],
+                              write_index=False,
+                              engine="pyarrow",
+                              )
 
     @staticmethod
     def map(content):
-        dest = content['destination_file']
         mapper = content['mapper']
         field_delimiter = content['field_delimiter']
+        file_id = content["file_id"]
 
         decoded_mapper = base64.b64decode(mapper)
-        for f in os.listdir(Command.init_folder_name_path):
-            if os.path.isfile(os.path.join(Command.init_folder_name_path, f)):
+        Command.paths_per_file_name[file_id]["segment_list"] = []
+        for f in os.listdir(Command.paths_per_file_name[file_id]["init_folder_name_path"]):
+            if os.path.isfile(os.path.join(Command.paths_per_file_name[file_id]["init_folder_name_path"], f)):
                 exec(decoded_mapper)
-                res = locals()['custom_mapper'](os.path.join(Command.init_folder_name_path, f))
-                res.to_csv(f"{Command.map_folder_name_path}{os.sep}{f}", index=False, mode="w", sep=field_delimiter)
+                res = locals()['custom_mapper'](os.path.join(
+                    Command.paths_per_file_name[file_id]["init_folder_name_path"], f))
+                # res.to_csv(f"{Command.paths_per_file_name[file_id]['map_folder_name_path']}{os.sep}{f}",
+                #            index=False, mode="w", sep=field_delimiter, single_file=True)
+                res.to_parquet(f"{Command.paths_per_file_name[file_id]['map_folder_name_path']}{os.sep}{f}",
+                               write_index=False,
+                               engine="pyarrow")
+                Command.paths_per_file_name[file_id]["segment_list"].append(f)
 
     @staticmethod
-    def min_max_hash(hash_key_list, file_name, field_delimiter):
+    def min_max_hash(hash_key_list, file_id, field_delimiter):
         with open(os.path.join('config', 'data_node_info.json')) as f:
             arbiter_address = json.load(f)['arbiter_address']
-
-        res = [
-            min(hash_key_list),
-            max(hash_key_list)
-        ]
         url = f'http://{arbiter_address}/command/hash'
         diction = {
-            'list_keys': res,
-            'file_name': file_name,
-            'field_delimiter': field_delimiter
+            'min_hash_value': min(hash_key_list),
+            'max_hash_value': max(hash_key_list),
+            'file_id': file_id,
         }
-        response = requests.post(url, json=diction)
+        response = requests.post(
+            url,
+            json=diction,
+            headers={'Content-type': 'application/json', 'Accept': 'text/plain'}
+        )
         return response
 
     @staticmethod
@@ -184,7 +233,8 @@ class Command:
             if item["file_name"] == file_name:
                 if os.path.exists(item['file_name_path']):
                     if remove_all:
-                        os.remove(item['file_name_path'])
+                        # os.remove(item['file_name_path'])
+                        shutil.rmtree(item['file_name_path'])
                 else:
                     updated_config['files'].remove(item)
                 if os.path.exists(item['folder_name_path']):
@@ -193,9 +243,11 @@ class Command:
 
     @staticmethod
     def move_file_to_init_folder(content):
-        if os.path.exists(Command.file_name_path):
-            shutil.move(Command.file_name_path, os.path.join(Command.init_folder_name_path,
-                                                             os.path.basename(Command.file_name_path)))
+        file_id = content["file_id"]
+        if os.path.exists(Command.paths_per_file_name[file_id]["file_name_path"]):
+            shutil.move(Command.paths_per_file_name[file_id]["file_name_path"],
+                        os.path.join(Command.paths_per_file_name[file_id]["init_folder_name_path"],
+                                     os.path.basename(Command.paths_per_file_name[file_id]["file_name_path"])))
 
     @staticmethod
     def get_file_from_cluster(context):
@@ -211,5 +263,26 @@ class Command:
                     'file_name': file_name,
                     'dest_file_name': context['dest_file_name']
                 }
-                response = requests.post(url, json=diction)
+                response = requests.post(
+                    url,
+                    json=diction,
+                    headers={'Content-type': 'application/json', 'Accept': 'text/plain'})
             return response
+
+    @staticmethod
+    def get_file(content: dict):
+        file_name = content['file_name']
+        file_id = content['file_id']
+        file_name_path = os.path.join(Command.paths_per_file_name[file_id]["data_folder_name_path"], file_name)
+
+        if os.path.exists(file_name_path):
+            segments = [f for f in os.listdir(file_name_path) if os.path.splitext(f)[-1] == ".part"]
+            for f in segments:
+                segment_path = str(os.path.abspath(os.path.join(file_name_path, f)))
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    df = dd.read_csv(segment_path)
+                    csv_path = os.path.join(tmp, f'{file_name}')
+                    df.to_csv(csv_path, single_file=True, index=False)
+                    with open(csv_path, "rb") as csv_file:
+                        yield csv_file.read()

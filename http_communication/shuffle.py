@@ -1,20 +1,21 @@
 import json
 import os
-import requests
+
+import dask.dataframe as dd
 import pandas as pd
+import requests
 
 from receive_commands.receive_commands import Command
 
 # uncomment for Ubuntu as it runs __file__ as ~
 os.chdir(os.path.dirname(os.path.dirname(__file__)))
 
-
-
 with open(os.path.join("config", "config.json")) as config_file:
     config = json.load(config_file)
 
 with open(os.path.join('config', 'data_node_info.json')) as arbiter_node_json_data:
     self_node_ip = json.load(arbiter_node_json_data)['self_address']
+
 
 class ShuffleCommand:
     def __init__(self, data, file_path, field_delimiter):
@@ -32,24 +33,25 @@ class ShuffleCommand:
             'field_delimiter': self._data['field_delimiter']
         }
         url = f'http://{self._data["data_node_ip"]}/command/finish_shuffle'
-        response = requests.post(url, json=data)
-        return response
+        try:
+            response = requests.post(url, json=data, timeout=10)
+            return response
+        except requests.exceptions.ReadTimeout:
+            pass
+        except requests.exceptions.ConnectionError:
+            pass
 
 
 def shuffle(content):
-    full_file_path = os.path.join(Command.shuffle_folder_name_path, 'shuffled.csv')
+    file_id = content["file_id"]
+    full_file_path = os.path.join(Command.paths_per_file_name[file_id]["shuffle_folder_name_path"], 'shuffled.csv')
     field_delimiter = content['field_delimiter']
 
-    files = []
+    for f in Command.paths_per_file_name[file_id]["segment_list"]:
+        data_f = pd.read_parquet(os.path.join(Command.paths_per_file_name[file_id]["map_folder_name_path"],
+                                              f, "part.0.parquet"))
 
-    # r=root, d=directories, f = files
-    for r, d, f in os.walk(Command.map_folder_name_path):
-        for file in f:
-            files.append(os.path.join(r, file))
-
-    for f in files:
-        data_f = pd.read_csv(f, sep=field_delimiter)
-        headers = list(data_f.columns)
+        # headers = list(data_f.columns)
 
         for i in content['nodes_keys']:
             index_list = []
@@ -59,18 +61,14 @@ def shuffle(content):
                 last_node = max == content['max_hash']
                 hash_item = Command.hash_f(item)
                 hash_item_in_range = min <= hash_item < max
-                if hash_item_in_range:
-                    index_list.append(index)
-                elif hash_item == max and last_node:
+                if hash_item_in_range or (hash_item == max and last_node):
                     index_list.append(index)
 
             if i['data_node_ip'] == self_node_ip:
-                if not os.path.isfile(full_file_path):
-                    data_f.iloc[index_list].to_csv(full_file_path, header=headers, encoding='utf-8', index=False,
-                                                   sep=field_delimiter)
-                else:
-                    data_f.iloc[index_list].to_csv(full_file_path, mode='a', header=False, index=False,
-                                                   encoding='utf-8', sep=field_delimiter)
+                dd.from_pandas(data_f.iloc[index_list], npartitions=1).to_parquet(full_file_path,
+                                                                                  write_index=False,
+                                                                                  engine="pyarrow"
+                                                                                  )
             else:
                 data = {'content': data_f.iloc[index_list].to_json(),
                         'data_node_ip': i['data_node_ip']}
